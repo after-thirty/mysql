@@ -44,6 +44,26 @@ type updateExecutor struct {
 	args        []driver.Value
 }
 
+type multiDeleteExecutor struct {
+	mc          *mysqlConn
+	originalSQL string
+	stmt        *ast.DeleteStmt
+	args        []driver.Value
+}
+
+type multiExecutor struct {
+	mc          *mysqlConn
+	originalSQL string
+	args        []driver.Value
+}
+
+type multiUpdateExecutor struct {
+	mc          *mysqlConn
+	originalSQL string
+	stmt        *ast.UpdateStmt
+	args        []driver.Value
+}
+
 func (executor *insertExecutor) GetTableName() string {
 	var sb strings.Builder
 	executor.stmt.Table.TableRefs.Left.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
@@ -464,6 +484,45 @@ func (executor *updateExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) 
 func (executor *updateExecutor) getTableMeta() (schema.TableMeta, error) {
 	tableMetaCache := GetTableMetaCache(executor.mc.cfg.DBName)
 	return tableMetaCache.GetTableMeta(executor.mc, executor.GetTableName())
+}
+
+func (executor *multiDeleteExecutor) GetTableName() string {
+	var sb strings.Builder
+	executor.stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
+}
+
+func (executor *multiDeleteExecutor) beforeImage() (*schema.TableRecords, error) {
+	return nil, nil
+}
+
+func (executor *multiDeleteExecutor) afterImage() (*schema.TableRecords, error) {
+	return nil, nil
+}
+
+func (executor *multiDeleteExecutor) getTableMeta() (schema.TableMeta, error) {
+	tableMetaCache := GetTableMetaCache(executor.mc.cfg.DBName)
+	return tableMetaCache.GetTableMeta(executor.mc, executor.GetTableName())
+}
+
+func (executor *multiExecutor) beforeImage() (*schema.TableRecords, error) {
+	return nil, nil
+}
+
+func (executor *multiExecutor) afterImage() (*schema.TableRecords, error) {
+	return nil, nil
+}
+
+func (executor *multiExecutor) prepareUndoLog(beforeImage, afterImage *schema.TableRecords) {
+
+}
+
+func (executor *multiUpdateExecutor) beforeImage() (*schema.TableRecords, error) {
+	return nil, nil
+}
+
+func (executor *multiUpdateExecutor) afterImage() (*schema.TableRecords, error) {
+	return nil, nil
 }
 
 func appendInParam(size int) string {
