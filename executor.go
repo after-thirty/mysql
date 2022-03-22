@@ -45,23 +45,23 @@ type updateExecutor struct {
 }
 
 type multiDeleteExecutor struct {
-	mc          *mysqlConn
-	originalSQL string
-	stmt        *ast.DeleteStmt
-	args        []driver.Value
+	mc           *mysqlConn
+	originalSQLs []string
+	stmts        []*ast.DeleteStmt
+	args         []driver.Value
 }
 
 type multiExecutor struct {
-	mc          *mysqlConn
-	originalSQL string
-	args        []driver.Value
+	mc           *mysqlConn
+	originalSQLs []string
+	args         []driver.Value
 }
 
 type multiUpdateExecutor struct {
-	mc          *mysqlConn
-	originalSQL string
-	stmt        *ast.UpdateStmt
-	args        []driver.Value
+	mc           *mysqlConn
+	originalSQLs []string
+	stmt         *ast.UpdateStmt
+	args         []driver.Value
 }
 
 func (executor *insertExecutor) GetTableName() string {
@@ -486,14 +486,88 @@ func (executor *updateExecutor) getTableMeta() (schema.TableMeta, error) {
 	return tableMetaCache.GetTableMeta(executor.mc, executor.GetTableName())
 }
 
+// GetTableName get first table name
 func (executor *multiDeleteExecutor) GetTableName() string {
 	var sb strings.Builder
-	executor.stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	executor.stmts[0].TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
 	return sb.String()
 }
 
+func (executor *multiDeleteExecutor) GetWhereCondition() string {
+	meta, _ := executor.getTableMeta()
+	var whereCondition strings.Builder
+	var whereConditionTmp strings.Builder
+	for _, stmt := range executor.stmts {
+		whereConditionTmp.Reset()
+		if stmt.Where == nil {
+			break
+		}
+		stmt.Where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &whereConditionTmp))
+		if whereCondition.Len() > 0 {
+			whereCondition.WriteString(" OR ")
+		}
+		whereCondition.WriteString(whereConditionTmp.String())
+	}
+
+	var suffix strings.Builder
+	suffix.WriteString(" FROM ")
+	suffix.WriteString(executor.GetTableName())
+	if whereCondition.Len() > 0 {
+		suffix.WriteString(" WHERE ")
+		suffix.WriteString(whereCondition.String())
+	}
+	suffix.WriteString(" FOR UPDATE")
+	// SELECT TODO
+	//meta.AllColumns
+	fmt.Println(meta.AllColumns)
+	return whereCondition.String()
+}
+
+func (executor *multiDeleteExecutor) buildTableRecords(tableMeta schema.TableMeta) (*schema.TableRecords, error) {
+	sql := executor.buildBeforeImageSql(tableMeta)
+	argsCount := strings.Count(sql, "?")
+	rows, err := executor.mc.prepareQuery(sql, executor.args[len(executor.args)-argsCount:])
+	if err != nil {
+		return nil, err
+	}
+	return buildRecords(tableMeta, rows), nil
+}
+
+func (executor *multiDeleteExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) string {
+	var b strings.Builder
+	fmt.Fprint(&b, "SELECT ")
+	var i = 0
+	columnCount := len(tableMeta.Columns)
+	for _, column := range tableMeta.Columns {
+		fmt.Fprint(&b, mysql.CheckAndReplace(column))
+		i = i + 1
+		if i != columnCount {
+			fmt.Fprint(&b, ",")
+		} else {
+			fmt.Fprint(&b, " ")
+		}
+	}
+	fmt.Fprintf(&b, " FROM %s WHERE ", executor.GetTableName())
+	fmt.Fprint(&b, executor.GetWhereCondition())
+	fmt.Fprint(&b, " FOR UPDATE")
+	return b.String()
+}
+
 func (executor *multiDeleteExecutor) beforeImage() (*schema.TableRecords, error) {
-	return nil, nil
+	if len(executor.originalSQLs) == 1 {
+		deleteExecutor := deleteExecutor{
+			mc:          executor.mc,
+			originalSQL: executor.originalSQLs[0],
+			stmt:        executor.stmts[0],
+			args:        executor.args,
+		}
+		return deleteExecutor.BeforeImage()
+	}
+	tableMeta, err := executor.getTableMeta()
+	if err != nil {
+		return nil, err
+	}
+	return executor.buildTableRecords(tableMeta)
 }
 
 func (executor *multiDeleteExecutor) afterImage() (*schema.TableRecords, error) {
