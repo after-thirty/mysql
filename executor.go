@@ -494,7 +494,6 @@ func (executor *multiDeleteExecutor) GetTableName() string {
 }
 
 func (executor *multiDeleteExecutor) GetWhereCondition() string {
-	meta, _ := executor.getTableMeta()
 	var whereCondition strings.Builder
 	var whereConditionTmp strings.Builder
 	for _, stmt := range executor.stmts {
@@ -517,10 +516,11 @@ func (executor *multiDeleteExecutor) GetWhereCondition() string {
 		suffix.WriteString(whereCondition.String())
 	}
 	suffix.WriteString(" FOR UPDATE")
-	// SELECT TODO
-	//meta.AllColumns
-	fmt.Println(meta.AllColumns)
-	return whereCondition.String()
+
+	var selectSql strings.Builder
+	selectSql.WriteString("SELECT *")
+	selectSql.WriteString(suffix.String())
+	return selectSql.String()
 }
 
 func (executor *multiDeleteExecutor) buildTableRecords(tableMeta schema.TableMeta) (*schema.TableRecords, error) {

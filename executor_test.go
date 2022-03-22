@@ -1,10 +1,13 @@
 package mysql
 
 import (
+	"testing"
+)
+
+import (
 	"github.com/pingcap/parser"
 	"github.com/pingcap/parser/ast"
 	"github.com/stretchr/testify/assert"
-	"testing"
 )
 
 func TestInsertExecutor_GetTableName(t *testing.T) {
@@ -42,11 +45,19 @@ func TestMultiDeleteExecutor(t *testing.T) {
 		insertStmts = append(insertStmts, insertStmt)
 	}
 
-	// TODO mc set
+	conn := new(mockConn)
+	mc := &mysqlConn{
+		buf: newBuffer(conn),
+		cfg: &Config{
+			DBName: "bigtest",
+		},
+	}
+
+	InitTableMetaCache("bigtest")
 
 	exec := multiDeleteExecutor{
 		originalSQLs: sourceSQLs,
-		mc:           nil,
+		mc:           mc,
 		stmts:        insertStmts,
 		args:         nil,
 	}
@@ -56,4 +67,7 @@ func TestMultiDeleteExecutor(t *testing.T) {
 
 	whereCondition := exec.GetWhereCondition()
 	assert.NotEmpty(t, whereCondition)
+
+	tableRes, _ := exec.beforeImage()
+	assert.NotEmpty(t, tableRes)
 }
