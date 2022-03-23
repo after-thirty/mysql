@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"github.com/gotrx/mysql/schema"
 	"testing"
 )
 
@@ -54,6 +55,11 @@ func TestMultiDeleteExecutor(t *testing.T) {
 	}
 
 	InitTableMetaCache("bigtest")
+	tableMeta := schema.TableMeta{
+		TableName: "bigtest",
+		Columns:   []string{"id", "name", "age"},
+	}
+	GetTableMetaCache("bigtest").AddCache("bigtest.s1", tableMeta)
 
 	exec := multiDeleteExecutor{
 		originalSQLs: sourceSQLs,
@@ -61,12 +67,6 @@ func TestMultiDeleteExecutor(t *testing.T) {
 		stmts:        insertStmts,
 		args:         nil,
 	}
-
-	tableName := exec.GetTableName()
-	assert.NotEmpty(t, tableName)
-
-	whereCondition := exec.GetWhereCondition()
-	assert.NotEmpty(t, whereCondition)
 
 	tableRes, _ := exec.beforeImage()
 	assert.NotEmpty(t, tableRes)
