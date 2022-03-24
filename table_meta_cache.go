@@ -74,7 +74,7 @@ func (cache *TableMetaCache) GetCacheKey(tableName string) string {
 	return fmt.Sprintf("%s.%s", cache.dbName, escape(tableName, "`"))
 }
 
-func (cache *TableMetaCache) AddCache(key string, x interface{}) {
+func (cache *TableMetaCache) addCache(key string, x interface{}) {
 	cache.tableMetaCache.Add(key, x, 10*EXPIRE_TIME)
 }
 
