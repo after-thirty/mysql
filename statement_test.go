@@ -149,3 +149,21 @@ func TestConvertJSON(t *testing.T) {
 		t.Fatalf("json.RawMessage converted, got %#v %T", out, out)
 	}
 }
+
+func TestExec(t *testing.T) {
+	mc := &mysqlConn{
+		buf:              newBuffer(nil),
+		maxAllowedPacket: maxPacketSize,
+		cfg: &Config{
+			InterpolateParams: true,
+		},
+		ctx: new(connCtx),
+	}
+	var sourceSQL = "update table_update_executor_test set name = 'WILL' where id = 1;\nupdate table_update_executor_test set name = 'WILL2' where id = 2;"
+
+	mysqlStmt := mysqlStmt{
+		mc:  mc,
+		sql: sourceSQL,
+	}
+	mysqlStmt.Exec(nil)
+}

@@ -63,42 +63,61 @@ func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 
 	if stmt.mc.ctx != nil {
 		parser := parser.New()
-		act, _ := parser.ParseOneStmt(stmt.sql, "", "")
-		deleteStmt, isDelete := act.(*ast.DeleteStmt)
-		if isDelete {
-			executor := &deleteExecutor{
-				mc:          stmt.mc,
-				originalSQL: stmt.sql,
-				stmt:        deleteStmt,
-				args:        args,
+		// parse multi
+		acts, warns, err := parser.Parse(stmt.sql, "", "")
+		if len(warns) > 0 {
+			return nil, warns[0]
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(acts) == 1 {
+			act := acts[0]
+			deleteStmt, isDelete := act.(*ast.DeleteStmt)
+			if isDelete {
+				executor := &deleteExecutor{
+					mc:          stmt.mc,
+					originalSQL: stmt.sql,
+					stmt:        deleteStmt,
+					args:        args,
+				}
+				stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
+				return executor.Execute()
+			}
+
+			insertStmt, isInsert := act.(*ast.InsertStmt)
+			if isInsert {
+				executor := &insertExecutor{
+					mc:          stmt.mc,
+					originalSQL: stmt.sql,
+					stmt:        insertStmt,
+					args:        args,
+				}
+				stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
+				return executor.Execute()
+			}
+
+			updateStmt, isUpdate := act.(*ast.UpdateStmt)
+			if isUpdate {
+				executor := &updateExecutor{
+					mc:          stmt.mc,
+					originalSQL: stmt.sql,
+					stmt:        updateStmt,
+					args:        args,
+				}
+				stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
+				return executor.Execute()
+			}
+		} else {
+			executor := &multiExecutor{
+				mc:   stmt.mc,
+				acts: acts,
+				args: args,
 			}
 			stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
 			return executor.Execute()
 		}
 
-		insertStmt, isInsert := act.(*ast.InsertStmt)
-		if isInsert {
-			executor := &insertExecutor{
-				mc:          stmt.mc,
-				originalSQL: stmt.sql,
-				stmt:        insertStmt,
-				args:        args,
-			}
-			stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
-			return executor.Execute()
-		}
-
-		updateStmt, isUpdate := act.(*ast.UpdateStmt)
-		if isUpdate {
-			executor := &updateExecutor{
-				mc:          stmt.mc,
-				originalSQL: stmt.sql,
-				stmt:        updateStmt,
-				args:        args,
-			}
-			stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
-			return executor.Execute()
-		}
 	}
 
 	// Send command
