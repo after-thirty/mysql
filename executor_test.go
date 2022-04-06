@@ -1,16 +1,11 @@
 package mysql
 
 import (
-	"database/sql/driver"
 	"fmt"
-	"math"
-	"testing"
-	"time"
-)
-
-import (
 	"github.com/pingcap/parser"
+	"github.com/pingcap/parser/ast"
 	"github.com/stretchr/testify/assert"
+	"testing"
 )
 
 import (
@@ -18,13 +13,8 @@ import (
 )
 
 var (
-	DBName     = "gotest"
-	deleteSQLs = []string{
-		"DELETE FROM s1 WHERE id = 1",
-		"DELETE FROM s1 WHERE id = 2",
-		"DELETE FROM s1",
-	}
-
+	DBName         = "gotest"
+	deleteSQL      = "DELETE FROM s1 WHERE id = 1\nDELETE FROM s1 WHERE id = 2\nDELETE FROM s1"
 	tableName      = "table_update_executor_test"
 	multiUpdateSQL = "update table_update_executor_test set name = 'WILL' where id = 1;\nupdate table_update_executor_test set name = 'WILL2' where id = 2"
 )
@@ -55,17 +45,14 @@ func TestMultiExecutor(t *testing.T) {
 	parser := parser.New()
 	acts, _, _ := parser.Parse(multiUpdateSQL, "", "")
 
-	exec := multiExecutor{
-		acts: acts,
-		args: []driver.Value{
-			int64(42424242),
-			float64(math.Pi),
-			false,
-			time.Unix(1423411542, 807015000),
-			[]byte("bytes containing special chars ' \" \a \x00"),
-			"string containing special chars ' \" \a \x00",
-		},
+	var stmts []*ast.DMLNode
+
+	for _, act := range acts {
+		node := act.(ast.DMLNode)
+		stmts = append(stmts, &node)
 	}
+
+	exec := NewBaseExecutor(&multiExecutor{stmts: stmts}, nil, multiUpdateSQL, nil)
 
 	tableRes, _ := exec.BeforeImage()
 	assert.NotEmpty(t, tableRes)

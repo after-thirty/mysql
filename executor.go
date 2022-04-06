@@ -9,7 +9,6 @@ import (
 
 	"github.com/gotrx/starfish/pkg/base/meta"
 	"github.com/gotrx/starfish/pkg/util/mysql"
-	sql2 "github.com/gotrx/starfish/pkg/util/sql"
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/format"
 
@@ -19,49 +18,27 @@ import (
 type IExecutor interface {
 	Execute() (driver.Result, error)
 	BeforeImage() (*schema.TableRecords, error)
-	AfterImage(beforeImage *schema.TableRecords) (*schema.TableRecords, error)
 }
 
 type BaseExecutor struct {
 	IExecutor
 	mc          *mysqlConn
 	originalSQL string
-	stmt        *ast.DMLNode
-	stmts       []*ast.DMLNode
 	args        []driver.Value
 }
 
-func (executor *BaseExecutor) GetTableName() string {
-	var sb strings.Builder
-	x := *executor.stmt
-	switch tmp := x.(type) {
-	case *ast.InsertStmt:
-		tmp.Table.TableRefs.Left.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	case *ast.DeleteStmt:
-		tmp.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	case *ast.SelectStmt:
-		table := tmp.From.TableRefs.Left.(*ast.TableSource)
-		table.Source.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	}
-	return sb.String()
+func NewBaseExecutor(executor IExecutor, mc *mysqlConn, originalSQL string, args []driver.Value) *BaseExecutor {
+	bs := &BaseExecutor{}
+	bs.IExecutor = executor
+	bs.args = args
+	bs.mc = mc
+	bs.originalSQL = originalSQL
+	return bs
 }
 
-func (executor *BaseExecutor) getTableMeta() (schema.TableMeta, error) {
+func (executor *BaseExecutor) getTableMeta(tableName string) (schema.TableMeta, error) {
 	tableMetaCache := GetTableMetaCache(executor.mc.cfg.DBName)
-	return tableMetaCache.GetTableMeta(executor.mc, executor.GetTableName())
-}
-
-func (executor *BaseExecutor) appendInParam(size int) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "(")
-	for i := 0; i < size; i++ {
-		fmt.Fprintf(&sb, "?")
-		if i < size-1 {
-			fmt.Fprint(&sb, ",")
-		}
-	}
-	fmt.Fprintf(&sb, ")")
-	return sb.String()
+	return tableMetaCache.GetTableMeta(executor.mc, tableName)
 }
 
 func (executor *BaseExecutor) buildLockKey(lockKeyRecords *schema.TableRecords) string {
@@ -132,46 +109,45 @@ func (executor *BaseExecutor) buildRecords(meta schema.TableMeta, rows driver.Ro
 	return records
 }
 
-func (executor *BaseExecutor) buildWhereCondition() string {
+func (executor *BaseExecutor) buildWhereCondition(where ast.ExprNode) string {
 	var sb strings.Builder
-	x := *executor.stmt
-	switch tmp := x.(type) {
-	case *ast.DeleteStmt:
-		tmp.Where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	}
+	where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
 	return sb.String()
-
 }
 
 type insertExecutor struct {
 	BaseExecutor
+	stmt *ast.InsertStmt
 }
 
 type deleteExecutor struct {
 	BaseExecutor
+	stmt *ast.DeleteStmt
 }
 
 type selectForUpdateExecutor struct {
 	BaseExecutor
+	stmt *ast.SelectStmt
 }
 
 type updateExecutor struct {
 	BaseExecutor
-}
-
-type multiDeleteExecutor struct {
-	BaseExecutor
+	stmt *ast.UpdateStmt
 }
 
 type multiExecutor struct {
 	BaseExecutor
+	stmts []*ast.DMLNode
 }
 
 type multiUpdateExecutor struct {
-	mc           *mysqlConn
-	originalSQLs []string
-	stmts        []*ast.UpdateStmt
-	args         []driver.Value
+	BaseExecutor
+	stmts []*ast.UpdateStmt
+}
+
+type multiDeleteExecutor struct {
+	BaseExecutor
+	stmts []*ast.DeleteStmt
 }
 
 func (executor *insertExecutor) GetInsertColumns() []string {
@@ -180,15 +156,6 @@ func (executor *insertExecutor) GetInsertColumns() []string {
 		result = append(result, col.Name.String())
 	}
 	return result
-}
-
-func (executor *updateExecutor) GetUpdateColumns() []string {
-	columns := make([]string, 0)
-
-	for _, assignment := range executor.stmt.List {
-		columns = append(columns, assignment.Column.Name.String())
-	}
-	return columns
 }
 
 func (executor *insertExecutor) Execute() (driver.Result, error) {
@@ -217,10 +184,10 @@ func (executor *insertExecutor) PrepareUndoLog(beforeImage, afterImage *schema.T
 
 	var lockKeyRecords = afterImage
 
-	lockKeys := buildLockKey(lockKeyRecords)
+	lockKeys := executor.buildLockKey(lockKeyRecords)
 	executor.mc.ctx.AppendLockKey(lockKeys)
 
-	sqlUndoLog := buildUndoItem(SQLType_INSERT, executor.GetTableName(), beforeImage, afterImage)
+	sqlUndoLog := executor.buildUndoItem(SQLType_INSERT, executor.GetTableName(), beforeImage, afterImage)
 	executor.mc.ctx.AppendUndoItem(sqlUndoLog)
 }
 
@@ -245,7 +212,7 @@ func (executor *insertExecutor) AfterImage(result sql.Result) (*schema.TableReco
 }
 
 func (executor *insertExecutor) BuildTableRecords(pkValues []driver.Value) (*schema.TableRecords, error) {
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -264,13 +231,13 @@ func (executor *insertExecutor) BuildTableRecords(pkValues []driver.Value) (*sch
 	}
 	fmt.Fprintf(&sb, "FROM %s ", executor.GetTableName())
 	fmt.Fprintf(&sb, " WHERE `%s` IN ", tableMeta.GetPKName())
-	fmt.Fprint(&sb, appendInParam(len(pkValues)))
+	fmt.Fprint(&sb, AppendInParam(len(pkValues)))
 
 	rows, err := executor.mc.prepareQuery(sb.String(), pkValues)
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *insertExecutor) getPKValuesByColumn() []driver.Value {
@@ -287,7 +254,7 @@ func (executor *insertExecutor) getPKValuesByColumn() []driver.Value {
 
 func (executor *insertExecutor) getPKIndex() int {
 	insertColumns := executor.GetInsertColumns()
-	tableMeta, _ := executor.getTableMeta()
+	tableMeta, _ := executor.getTableMeta(executor.GetTableName())
 
 	if insertColumns != nil && len(insertColumns) > 0 {
 		for i, columnName := range insertColumns {
@@ -313,9 +280,15 @@ func (executor *insertExecutor) getColumnLen() int {
 	if insertColumns != nil {
 		return len(insertColumns)
 	}
-	tableMeta, _ := executor.getTableMeta()
+	tableMeta, _ := executor.getTableMeta(executor.GetTableName())
 
 	return len(tableMeta.Columns)
+}
+
+func (executor *insertExecutor) GetTableName() string {
+	var sb strings.Builder
+	executor.stmt.Table.TableRefs.Left.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
 }
 
 func (executor *deleteExecutor) Execute() (driver.Result, error) {
@@ -342,15 +315,15 @@ func (executor *deleteExecutor) PrepareUndoLog(beforeImage, afterImage *schema.T
 
 	var lockKeyRecords = beforeImage
 
-	lockKeys := buildLockKey(lockKeyRecords)
+	lockKeys := executor.buildLockKey(lockKeyRecords)
 	executor.mc.ctx.AppendLockKey(lockKeys)
 
-	sqlUndoLog := buildUndoItem(SQLType_DELETE, executor.GetTableName(), beforeImage, afterImage)
+	sqlUndoLog := executor.buildUndoItem(SQLType_DELETE, executor.GetTableName(), beforeImage, afterImage)
 	executor.mc.ctx.AppendUndoItem(sqlUndoLog)
 }
 
 func (executor *deleteExecutor) BeforeImage() (*schema.TableRecords, error) {
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +339,7 @@ func (executor *deleteExecutor) buildTableRecords(tableMeta schema.TableMeta) (*
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *deleteExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) string {
@@ -384,13 +357,19 @@ func (executor *deleteExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) 
 		}
 	}
 	fmt.Fprintf(&b, " FROM %s WHERE ", executor.GetTableName())
-	fmt.Fprint(&b, executor.GetWhereCondition())
+	fmt.Fprint(&b, executor.buildWhereCondition(executor.stmt.Where))
 	fmt.Fprint(&b, " FOR UPDATE")
 	return b.String()
 }
 
+func (executor *deleteExecutor) GetTableName() string {
+	var sb strings.Builder
+	executor.stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
+}
+
 func (executor *selectForUpdateExecutor) Execute(lockRetryInterval time.Duration, lockRetryTimes int) (driver.Rows, error) {
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -398,8 +377,8 @@ func (executor *selectForUpdateExecutor) Execute(lockRetryInterval time.Duration
 	if err != nil {
 		return nil, err
 	}
-	selectPKRows := buildRecords(tableMeta, rows)
-	lockKeys := buildLockKey(selectPKRows)
+	selectPKRows := executor.buildRecords(tableMeta, rows)
+	lockKeys := executor.buildLockKey(selectPKRows)
 	if lockKeys == "" {
 		return rows, err
 	} else {
@@ -420,6 +399,21 @@ func (executor *selectForUpdateExecutor) Execute(lockRetryInterval time.Duration
 		}
 	}
 	return rows, err
+}
+
+func (executor *selectForUpdateExecutor) GetTableName() string {
+	var sb strings.Builder
+	table := executor.stmt.From.TableRefs.Left.(*ast.TableSource)
+	table.Source.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
+}
+
+func (executor *updateExecutor) GetUpdateColumns() []string {
+	columns := make([]string, 0)
+	for _, assignment := range executor.stmt.List {
+		columns = append(columns, assignment.Column.Name.String())
+	}
+	return columns
 }
 
 func (executor *updateExecutor) Execute() (driver.Result, error) {
@@ -447,15 +441,15 @@ func (executor *updateExecutor) PrepareUndoLog(beforeImage, afterImage *schema.T
 
 	var lockKeyRecords = afterImage
 
-	lockKeys := buildLockKey(lockKeyRecords)
+	lockKeys := executor.buildLockKey(lockKeyRecords)
 	executor.mc.ctx.AppendLockKey(lockKeys)
 
-	sqlUndoLog := buildUndoItem(SQLType_UPDATE, executor.GetTableName(), beforeImage, afterImage)
+	sqlUndoLog := executor.buildUndoItem(SQLType_UPDATE, executor.GetTableName(), beforeImage, afterImage)
 	executor.mc.ctx.AppendUndoItem(sqlUndoLog)
 }
 
 func (executor *updateExecutor) BeforeImage() (*schema.TableRecords, error) {
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +461,7 @@ func (executor *updateExecutor) AfterImage(beforeImage *schema.TableRecords) (*s
 		return nil, nil
 	}
 
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +474,7 @@ func (executor *updateExecutor) AfterImage(beforeImage *schema.TableRecords) (*s
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *updateExecutor) buildAfterImageSql(tableMeta schema.TableMeta, beforeImage *schema.TableRecords) string {
@@ -499,7 +493,7 @@ func (executor *updateExecutor) buildAfterImageSql(tableMeta schema.TableMeta, b
 	}
 	fmt.Fprintf(&b, " FROM %s ", executor.GetTableName())
 	fmt.Fprintf(&b, "WHERE `%s` IN", tableMeta.GetPKName())
-	fmt.Fprint(&b, sql2.AppendInParam(len(beforeImage.PKFields())))
+	fmt.Fprint(&b, AppendInParam(len(beforeImage.PKFields())))
 	return b.String()
 }
 
@@ -510,7 +504,7 @@ func (executor *updateExecutor) buildTableRecords(tableMeta schema.TableMeta) (*
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *updateExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) string {
@@ -528,27 +522,60 @@ func (executor *updateExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) 
 		}
 	}
 	fmt.Fprintf(&b, " FROM %s WHERE ", executor.GetTableName())
-	fmt.Fprint(&b, executor.GetWhereCondition())
+	fmt.Fprint(&b, executor.buildWhereCondition(executor.stmt.Where))
 	fmt.Fprint(&b, " FOR UPDATE")
 	return b.String()
 }
 
-//func (executor *multiDeleteExecutor) GetWhereCondition() string {
-//	var whereCondition strings.Builder
-//	var whereConditionTmp strings.Builder
-//	for _, stmt := range executor.stmts {
-//		whereConditionTmp.Reset()
-//		if stmt.Where == nil {
-//			break
-//		}
-//		stmt.Where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &whereConditionTmp))
-//		if whereCondition.Len() > 0 {
-//			whereCondition.WriteString(" OR ")
-//		}
-//		whereCondition.WriteString(whereConditionTmp.String())
-//	}
-//	return whereCondition.String()
-//}
+func (executor *multiExecutor) BeforeImage() (*schema.TableRecords, error) {
+	// group TODO
+	//_, isDelete := (*executor.stmts[0]).(*ast.DeleteStmt)
+	//if isDelete {
+	//	tmpStmts := make([]*ast.DeleteStmt, 2)
+	//	tmpOriginalSQLs := make([]string, 2)
+	//	for index, actTmp := range executor.stmts {
+	//		stmt := (*actTmp).(*ast.DeleteStmt)
+	//		tmpStmts[index] = stmt
+	//		tmpOriginalSQLs[index] = stmt.Text()
+	//	}
+	//	multiDelete := &multiDeleteExecutor{
+	//		BaseExecutor{
+	//			mc:          executor.mc,
+	//			stmts:       tmpStmts,
+	//			originalSQL: tmpOriginalSQLs,
+	//			args:        executor.args,
+	//		},
+	//	}
+	//	return multiDelete.BeforeImage()
+	//}
+	//
+	//_, isUpdate := executor.acts[0].(*ast.UpdateStmt)
+	//if isUpdate {
+	//	tmpStmts := make([]*ast.UpdateStmt, len(executor.acts))
+	//	tmpOriginalSQLs := make([]string, len(executor.acts))
+	//	for index, actTmp := range executor.acts {
+	//		stmt := actTmp.(*ast.UpdateStmt)
+	//		tmpStmts[index] = stmt
+	//		tmpOriginalSQLs[index] = stmt.Text()
+	//	}
+	//	multiUpdate := &multiUpdateExecutor{
+	//		BaseExecutor{
+	//			mc:           executor.mc,
+	//			stmts:        tmpStmts,
+	//			originalSQLs: tmpOriginalSQLs,
+	//			args:         executor.args,
+	//		},
+	//	}
+	//	return multiUpdate.BeforeImage()
+	//}
+	return nil, nil
+}
+
+func (executor *updateExecutor) GetTableName() string {
+	var sb strings.Builder
+	executor.stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
+}
 
 func (executor *multiDeleteExecutor) buildTableRecords(tableMeta schema.TableMeta) (*schema.TableRecords, error) {
 	sql := executor.buildBeforeImageSql(tableMeta)
@@ -557,14 +584,14 @@ func (executor *multiDeleteExecutor) buildTableRecords(tableMeta schema.TableMet
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *multiDeleteExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) string {
 	var suffix strings.Builder
 	suffix.WriteString(" FROM ")
 	suffix.WriteString(executor.GetTableName())
-	whereCondition := executor.GetWhereCondition()
+	whereCondition := executor.buildWhereCondition(executor.stmts[0].Where)
 	if len(whereCondition) > 0 {
 		suffix.WriteString(" WHERE ")
 		suffix.WriteString(whereCondition)
@@ -578,16 +605,16 @@ func (executor *multiDeleteExecutor) buildBeforeImageSql(tableMeta schema.TableM
 }
 
 func (executor *multiDeleteExecutor) BeforeImage() (*schema.TableRecords, error) {
-	if len(executor.originalSQLs) == 1 {
-		deleteExecutor := deleteExecutor{
-			mc:          executor.mc,
-			originalSQL: executor.originalSQLs[0],
-			stmt:        executor.stmts[0],
-			args:        executor.args,
+	if len(executor.stmts) == 1 {
+		exec := &deleteExecutor{
+			stmt: executor.stmts[0],
 		}
-		return deleteExecutor.BeforeImage()
+		exec.mc = executor.mc
+		exec.originalSQL = executor.originalSQL
+		exec.args = executor.args
+		return exec.BeforeImage()
 	}
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -599,22 +626,30 @@ func (executor *multiDeleteExecutor) Execute() (*schema.TableRecords, error) {
 	return nil, nil
 }
 
+func (executor *multiDeleteExecutor) GetTableName() string {
+	var sb strings.Builder
+	stmt := executor.stmts[0]
+	stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	return sb.String()
+}
+
 // GetTableName get first table name
 func (executor *multiUpdateExecutor) GetTableName() string {
 	var sb strings.Builder
-	executor.stmts[0].TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
+	stmt := executor.stmts[0]
+	stmt.TableRefs.TableRefs.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
 	return sb.String()
 }
 
 func (executor *multiUpdateExecutor) GetWhereCondition() string {
 	var whereCondition strings.Builder
 	var whereConditionTmp strings.Builder
-	for _, stmt := range executor.stmts {
+	for _, stmtTmp := range executor.stmts {
 		whereConditionTmp.Reset()
-		if stmt.Where == nil {
+		if stmtTmp.Where == nil {
 			break
 		}
-		stmt.Where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &whereConditionTmp))
+		stmtTmp.Where.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &whereConditionTmp))
 		if whereCondition.Len() > 0 {
 			whereCondition.WriteString(" OR ")
 		}
@@ -630,7 +665,7 @@ func (executor *multiUpdateExecutor) buildTableRecords(tableMeta schema.TableMet
 	if err != nil {
 		return nil, err
 	}
-	return buildRecords(tableMeta, rows), nil
+	return executor.buildRecords(tableMeta, rows), nil
 }
 
 func (executor *multiUpdateExecutor) buildBeforeImageSql(tableMeta schema.TableMeta) string {
@@ -651,16 +686,16 @@ func (executor *multiUpdateExecutor) buildBeforeImageSql(tableMeta schema.TableM
 }
 
 func (executor *multiUpdateExecutor) BeforeImage() (*schema.TableRecords, error) {
-	if len(executor.originalSQLs) == 1 {
-		updateExecutor := updateExecutor{
-			mc:          executor.mc,
-			originalSQL: executor.originalSQLs[0],
-			stmt:        executor.stmts[0],
-			args:        executor.args,
+	if len(executor.stmts) == 1 {
+		exec := updateExecutor{
+			stmt: executor.stmts[0],
 		}
-		return updateExecutor.BeforeImage()
+		exec.mc = executor.mc
+		exec.originalSQL = executor.originalSQL
+		exec.args = executor.args
+		return exec.BeforeImage()
 	}
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
@@ -668,82 +703,31 @@ func (executor *multiUpdateExecutor) BeforeImage() (*schema.TableRecords, error)
 }
 
 func (executor *multiUpdateExecutor) AfterImage(beforeImage *schema.TableRecords) (*schema.TableRecords, error) {
-	if len(executor.originalSQLs) == 1 {
-		updateExecutor := updateExecutor{
-			mc:          executor.mc,
-			originalSQL: executor.originalSQLs[0],
-			stmt:        executor.stmts[0],
-			args:        executor.args,
+	if len(executor.stmts) == 1 {
+		exec := updateExecutor{
+			stmt: executor.stmts[0],
 		}
-		return updateExecutor.AfterImage(beforeImage)
+		exec.mc = executor.mc
+		exec.originalSQL = executor.originalSQL
+		exec.args = executor.args
+		return exec.AfterImage(beforeImage)
 	}
-	tableMeta, err := executor.getTableMeta()
+	tableMeta, err := executor.getTableMeta(executor.GetTableName())
 	if err != nil {
 		return nil, err
 	}
 	return executor.buildTableRecords(tableMeta)
 }
 
-func (executor *multiUpdateExecutor) buildAfterImageSQL(ta schema.TableMeta, beforeImage *schema.TableRecords) string {
-	return ""
-}
-
-func (executor *multiUpdateExecutor) Execute() (*schema.TableRecords, error) {
-	// TODO
-	return nil, nil
-}
-func (executor *multiExecutor) Execute() (driver.Result, error) {
-	// TODO
-	return nil, nil
-}
-
-func (executor *multiExecutor) BeforeImage() (*schema.TableRecords, error) {
-	// group TODO
-	_, isDelete := executor.stmts[0].(*ast.DeleteStmt)
-	if isDelete {
-		tmpStmts := make([]*ast.DeleteStmt, 2)
-		tmpOriginalSQLs := make([]string, 2)
-		for index, actTmp := range executor.stmts {
-			stmt := actTmp.(*ast.DeleteStmt)
-			tmpStmts[index] = stmt
-			tmpOriginalSQLs[index] = stmt.Text()
+func AppendInParam(size int) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "(")
+	for i := 0; i < size; i++ {
+		fmt.Fprintf(&sb, "?")
+		if i < size-1 {
+			fmt.Fprint(&sb, ",")
 		}
-		multiDelete := &multiDeleteExecutor{
-			BaseExecutor{
-				mc:          executor.mc,
-				stmts:       tmpStmts,
-				originalSQL: tmpOriginalSQLs,
-				args:        executor.args,
-			},
-		}
-		return multiDelete.BeforeImage()
 	}
-
-	_, isUpdate := executor.acts[0].(*ast.UpdateStmt)
-	if isUpdate {
-		tmpStmts := make([]*ast.UpdateStmt, len(executor.acts))
-		tmpOriginalSQLs := make([]string, len(executor.acts))
-		for index, actTmp := range executor.acts {
-			stmt := actTmp.(*ast.UpdateStmt)
-			tmpStmts[index] = stmt
-			tmpOriginalSQLs[index] = stmt.Text()
-		}
-		multiUpdate := &multiUpdateExecutor{
-			mc:           executor.mc,
-			stmts:        tmpStmts,
-			originalSQLs: tmpOriginalSQLs,
-			args:         executor.args,
-		}
-		return multiUpdate.BeforeImage()
-	}
-	return nil, nil
-}
-
-func (executor *multiExecutor) AfterImage(beforeImage *schema.TableRecords) (*schema.TableRecords, error) {
-	// TODO
-	return nil, nil
-}
-
-func (executor *multiExecutor) PrepareUndoLog(beforeImage, afterImage *schema.TableRecords) {
-	// TODO
+	fmt.Fprintf(&sb, ")")
+	return sb.String()
 }
