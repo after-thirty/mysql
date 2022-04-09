@@ -71,22 +71,24 @@ func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		baseExec := BaseExecutor{
+			stmt.mc, stmt.sql, args,
+		}
+		var iExec IExecutor
 		if len(acts) == 1 {
 			act := acts[0]
 			// StmtNode -> DMLNode
 			dml := act.(ast.DMLNode)
 
-			var baseExec *BaseExecutor
 			switch stmtTmp := dml.(type) {
 			case *ast.DeleteStmt:
-				baseExec = NewBaseExecutor(&deleteExecutor{stmt: stmtTmp}, stmt.mc, stmt.sql, args)
+				iExec = &deleteExecutor{baseExec, stmtTmp}
 			case *ast.UpdateStmt:
-				baseExec = NewBaseExecutor(&updateExecutor{stmt: stmtTmp}, stmt.mc, stmt.sql, args)
+				iExec = &updateExecutor{baseExec, stmtTmp}
 			case *ast.InsertStmt:
-				baseExec = NewBaseExecutor(&insertExecutor{stmt: stmtTmp}, stmt.mc, stmt.sql, args)
+				iExec = &insertExecutor{baseExec, stmtTmp}
 			}
-			stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
-			return baseExec.Execute()
 		} else {
 			var stmts []*ast.DMLNode
 
@@ -94,11 +96,10 @@ func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 				node := act.(ast.DMLNode)
 				stmts = append(stmts, &node)
 			}
-			executor := NewBaseExecutor(&multiExecutor{stmts: stmts}, stmt.mc, stmt.sql, args)
-			stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
-			return executor.Execute()
+			iExec = &multiExecutor{baseExec, stmts, nil}
 		}
-
+		stmt.mc.writeCommandPacketUint32(comStmtClose, stmt.id)
+		return iExec.Execute()
 	}
 
 	// Send command
