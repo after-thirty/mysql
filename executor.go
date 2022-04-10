@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"strings"
 	"time"
+)
 
-	"github.com/gotrx/starfish/pkg/base/meta"
-	"github.com/gotrx/starfish/pkg/util/mysql"
+import (
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/format"
+	"github.com/transaction-mesh/starfish/pkg/base/meta"
+	"github.com/transaction-mesh/starfish/pkg/util/mysql"
+	sql2 "github.com/transaction-mesh/starfish/pkg/util/sql"
+)
 
-	"github.com/gotrx/mysql/schema"
+import (
+	"github.com/transaction-mesh/mysql/schema"
 )
 
 // IExecutor : basic executor
