@@ -13,7 +13,6 @@ import (
 	"github.com/pingcap/parser/format"
 	"github.com/transaction-mesh/starfish/pkg/base/meta"
 	"github.com/transaction-mesh/starfish/pkg/util/mysql"
-	sql2 "github.com/transaction-mesh/starfish/pkg/util/sql"
 )
 
 import (
@@ -541,7 +540,10 @@ func (executor *multiExecutor) BeforeImage() (*schema.TableRecords, error) {
 				stmts:        tmpStmts,
 			}
 		}
-		iExec.BeforeImage()
+		_, err := iExec.BeforeImage()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return nil, nil
 }
